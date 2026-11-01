@@ -71,7 +71,16 @@ const x = (a: number, b: number) => (a / b).toFixed(2);
 const rtTag = (rt: string) =>
   `<span class="bm-rt${rt === 'node' ? ' bm-rt-node' : ''}">${rt === 'bun' ? 'Bun' : 'Node'}</span>`;
 
-const asenaBest = (s: string) => rps('asena-ergenecore', 'bun', s);
+// The NestJS apps read through TypeORM, so the database comparison uses Asena's ORM route
+// (drizzle), not raw Bun.sql — ORM against ORM.
+const ASENA_SIDE: Record<string, string> = { s6a: 's6a-orm' };
+const asenaBest = (s: string) => rps('asena-ergenecore', 'bun', ASENA_SIDE[s] ?? s);
+const BADGE_LABEL: Record<string, string> = {
+  s5: 'Validation · Zod vs class-validator',
+  s6a: 'DB read · Drizzle vs TypeORM',
+};
+/** this sweep split one warm-up budget over the routes; later sweeps give every route the same seconds */
+const LEGACY_WARMUP = !!ENV.warmupNote;
 // `nest new` gives you Express on Node. That default is the headline comparison; Fastify and
 // Bun are the two upgrades a NestJS team can reach for, so each card prints both.
 const DEFAULT_NEST = 'nest-express';
@@ -138,7 +147,7 @@ function nestBunSlower(): string[] {
 
 function versusNest(scenario: string): string {
   const row = (app: string, rt: string, name: string) =>
-    `      <div${app === 'asena-ergenecore' ? ' class="is-me"' : ''}><b>${n(rps(app, rt, scenario))}</b><span>${name}</span></div>`;
+    `      <div${app === 'asena-ergenecore' ? ' class="is-me"' : ''}><b>${n(app === 'asena-ergenecore' ? asenaBest(scenario) : rps(app, rt, scenario))}</b><span>${name}</span></div>`;
   return `<div class="bm-vs-card">
     <div class="bm-vs-scenario">${SCENARIOS[scenario]!.title}</div>
     <div class="bm-vs-big">${vs(scenario, DEFAULT_NEST, 'node')}<span>×</span></div>
@@ -146,7 +155,7 @@ function versusNest(scenario: string): string {
     <div class="bm-vs-alt"><b>${vs(scenario, TUNED_NEST, 'node')}×</b> against <strong>NestJS + Fastify</strong> on Node <span class="bm-paren">(${vs(scenario, TUNED_NEST, 'bun')}× on Bun)</span></div>
     <div class="bm-vs-detail">
 ${[
-  row('asena-ergenecore', 'bun', 'Asena · Ergenecore · Bun'),
+  row('asena-ergenecore', 'bun', `Asena · Ergenecore · Bun${ASENA_SIDE[scenario] ? ' · Drizzle' : ''}`),
   row('nest-express', 'node', 'NestJS · Express · Node'),
   row('nest-express', 'bun', 'NestJS · Express · Bun'),
   row('nest-fastify', 'node', 'NestJS · Fastify · Node'),
@@ -188,8 +197,8 @@ llms: false
 # Benchmarks
 
 Eight frameworks, two runtimes, eleven scenarios, one frozen contract. Every application
-returns **byte-for-byte identical responses** to byte-for-byte identical requests — verified
-mechanically before a single measurement was taken. Without that, a benchmark compares
+returns **byte-for-byte identical responses** to byte-for-byte identical requests, verified
+mechanically on the exact builds that were measured. Without that, a benchmark compares
 implementations, not frameworks.
 
 ::: info Read the charts honestly: Elysia and Hono are right there
@@ -212,10 +221,11 @@ shape NestJS gives you, and NestJS is the comparison this page is really about.
 </div>
 
 <div class="bm-hero-badges">
-${BADGES.map((s) => `  <div class="bm-badge"><b>${vs(s, DEFAULT_NEST, 'node')}×</b><span>${SCENARIOS[s]!.title}</span></div>`).join('\n')}
+${BADGES.map((s) => `  <div class="bm-badge"><b>${vs(s, DEFAULT_NEST, 'node')}×</b><span>${BADGE_LABEL[s] ?? SCENARIOS[s]!.title}</span></div>`).join('\n')}
 </div>
 
-<div class="bm-badges-note">Asena · Ergenecore vs NestJS · Express · Node.</div>
+<div class="bm-badges-note">Asena · Ergenecore vs NestJS · Express · Node. Each stack runs its own validator and data
+layer, so those two badges compare the stacks you get, libraries included.</div>
 
 ## Asena vs NestJS
 
@@ -232,7 +242,8 @@ ${CARDS.map(versusNest).join('\n')}
 and that is what the headline divides by — the configuration you actually get. The three
 smaller figures are the escapes, applied one at a time: swap Express for Fastify, move Node
 to Bun, or do both. None of them closes the gap, and every raw req/s behind them is printed
-on the card so you can check the arithmetic.
+on the card so you can check the arithmetic. On the database card Asena reads through Drizzle,
+because NestJS reads through TypeORM: ORM against ORM.
 
 ${nestBunSlower().length
   ? `Moving to Bun is not a free win everywhere: ${nestBunSlower().join(', ')} ${nestBunSlower().length > 1 ? 'are' : 'is'} slower on Bun
@@ -255,13 +266,16 @@ and those middlewares do different amounts of work per request:
   startup, so the 4 KB page skips the per-request filesystem lookup entirely.
 - **Asena · Ergenecore** stats the file on every request but keeps small files' descriptors,
   MIME type and headers open between requests and reads fresh bytes through them.
-- **Asena · Hono adapter** and **Hono** use \`serveStatic\` from \`hono/bun\`: stat, then a
-  \`Bun.file()\` response.
-- **Express, Fastify and both NestJS stacks** stat the file and open a new read stream on every
-  request.
+- **Asena · Hono adapter** ships its own wrapper around \`hono/serve-static\`: a synchronous
+  stat, then a \`Bun.file()\` response.
+- **Hono** uses \`serveStatic\` from \`hono/bun\`: an asynchronous stat plus an existence check,
+  then a \`Bun.file()\` response.
+- **Express, Fastify and both NestJS stacks** stat the file asynchronously and open a new read
+  stream on every request; on Node that goes through the libuv thread pool, on the same core.
 
-The 256 KB file takes the plain per-request path in every stack. Read the 4 KB chart as
-"what each framework's recommended static setup costs", not as equal work.
+On the 256 KB file Elysia and Ergenecore fall back to the per-request path too, and the ranking
+follows synchronous against asynchronous stat. Read both static charts as "what each
+framework's recommended static setup costs on one core", not as equal work.
 :::
 
 ## Node vs Bun
@@ -296,15 +310,18 @@ Only the adapter import changes.
 ${['s1a', 's1b', 's3', 's5', 's6a', 's4a'].map((s) =>
   `| ${SCENARIOS[s]!.title} | ${n(rps('asena-ergenecore', 'bun', s))} | ${n(rps('asena-hono', 'bun', s))} |`).join('\n')}
 
-Ergenecore leads on raw throughput and static files; on the body-heavy API endpoint the two
-are level. Pick Ergenecore for speed, the Hono adapter when you want Hono's
+Ergenecore leads on raw throughput; on the body-heavy API endpoint and the database read the
+two are level. The static gap is the two adapters' different file-serving strategies (see the
+warning above), not routing. Pick Ergenecore for speed, the Hono adapter when you want Hono's
 middleware ecosystem.
 
 ## What an ORM costs
 
 Asena exposes the same three database operations twice: once over raw \`Bun.sql\`, once over
-\`@asenajs/asena-drizzle\`. Same queries, same response bytes, same driver — the only
-difference is the query builder.
+\`@asenajs/asena-drizzle\`. Same tables, same response bytes, the same \`Bun.sql\` driver, each
+path with its own pool of 20 connections. The cost column is everything the ORM path adds:
+Drizzle building the statement on every call (the read by id also gets a \`LIMIT 1\`), mapping
+rows back to objects, and the repository resolving its connection per access.
 
 | Operation | Raw \`Bun.sql\` | Drizzle | Cost |
 |:---|--:|--:|--:|
@@ -322,8 +339,11 @@ ${ROWS.every((r) => mem(r.app, r.rt).oom === 0) ? 'no server came anywhere near 
 
 ### Peak under load
 
-The highest RSS seen across all of a target's scenarios — including the 256 KB static
-files and the database list, the most allocation-heavy routes in the suite.
+The highest RSS seen across all of a target's scenarios. For Elysia, Hono and Asena ·
+Ergenecore that is the first scenario after warm-up, before the garbage collector has given back
+what the warm-up allocated; Asena · Hono adapter peaks on an ORM route only Asena serves; for
+the Node-based stacks it is the 256 KB static file or the validation route. Asena's figures
+include its second (Drizzle) connection pool.
 
 ${memChart((m) => m.peak)}
 
@@ -339,12 +359,13 @@ ${ROWS.map(({ app, rt }) => {
 }).join('\n')}
 
 - **Ready by** is wall time from spawning the process to the first successful response,
-  including the runtime's own boot. The harness polls every 150 ms, so the number is only as
-  fine as that step: everything except NestJS answered on the first poll, NestJS on the second.
-- **RSS** counts every page the process has mapped, including the runtime binary itself.
-  That is why a Bun process starts above 30 MB before the application has done anything.
-- **After warm-up** follows ${P.warmup} seconds of traffic across every route: JIT-compiled code,
-  connection pools and caches are all resident by then. It is the number to size a container by.
+  including the runtime's own boot. The harness polls once immediately and then every 150 ms,
+  so the number is only as fine as that step: everything except NestJS answered on the second
+  poll (~150 ms), NestJS on the third (~300 ms).
+- **RSS** counts the pages the process actually holds in memory, including the runtime's own
+  code. That is why a Bun process starts above 30 MB before the application has done anything.
+- **After warm-up** follows traffic on every route: JIT-compiled code, connection pools and
+  caches are all resident by then. It is the number to size a container by.
 
 ## Full results
 
@@ -360,10 +381,10 @@ ${ROWS.map(({ app, rt }) => `| ${LABEL[app].replace(/<[^>]+>/g, ' ').trim()} | $
 |---|---|
 | Hardware | ${ENV.cpuModel ?? 'AMD Ryzen 9 9950X3D'} · 16C/32T · 60 GB RAM · Linux ${ENV.kernel ?? ''} · CPU governor \`${ENV.governor ?? 'performance'}\` |
 | Runtimes | Bun ${ENV.bun ?? R.find((t) => t.runtime === 'bun')?.runtimeVersion} · Node ${String(ENV.node ?? R.find((t) => t.runtime === 'node')?.runtimeVersion).replace(/^v/, '')} · ${ENV.postgres?.replace(/\s*\(Debian.*$/, '').replace('postgres (PostgreSQL)', 'PostgreSQL') ?? 'PostgreSQL'} |
-| Server budget | **1 CPU, ${ENV.serverLimits?.match(/MemoryMax=(\S+?),/)?.[1]?.replace('G', ' GB') ?? '2 GB'} RAM** per server — pinned to one logical core whose SMT sibling stays idle, inside a cgroup with a hard memory cap and no swap |
+| Server budget | **1 CPU, ${ENV.serverLimits?.match(/MemoryMax=(\S+?),/)?.[1]?.replace('G', ' GB') ?? '2 GB'} RAM** per server — pinned to one logical core (no other benchmark work is placed on it or its SMT sibling), inside a cgroup with a hard memory cap and no swap |
 | Order | **strictly sequential** — exactly one server runs at a time; nothing else is benchmarked alongside it |
 | Server lifecycle | one fresh process per framework, reused for all of its scenarios |
-| Warm-up | ${P.warmup}s per process before the first measurement, cycling through every scenario so every route is JIT-warm; discarded |
+| Warm-up | ${LEGACY_WARMUP ? `${P.warmup}s per process before the first measurement, split evenly over every route so each is JIT-warm` : `${P.warmup}s on every route before the first measurement`}; discarded |
 | Measurement | ${P.duration}s per scenario, back to back, ${R[0]!.reps} run each |
 | Load generator | \`wrk\`, ${P.threads} threads, ${P.connections} connections, on two physical cores of their own (\`${ENV.wrkCommand ?? ''}\`) |
 | Database | PostgreSQL in a container pinned to five cores of its own, pool size 20 in every app, 10,000 seeded rows, \`synchronous_commit = off\`; write tables truncated before every write scenario |
@@ -380,9 +401,11 @@ ${APPS.map((app) => {
   return `| ${plain(app)} | ${t.meta.frameworkVersion ?? ''} | ${ts.map((x) => (x.runtime === 'bun' ? 'Bun' : 'Node')).join(', ')} | ${t.dbLayer} | ${t.validator} |`;
 }).join('\n')}
 
-**Byte-level conformance is the gate.** Before any target is measured it must return the
-exact expected bytes for all eleven contract requests plus the negative cases. A target that
-fails is skipped, not measured.
+**Byte-level conformance is the gate.** Every app must return the exact expected bytes for all
+eleven contract requests plus the negative cases.
+${LEGACY_WARMUP
+  ? 'For this sweep the check ran on the exact builds that were measured, right after the sweep, and all eight apps passed; the harness now runs it against every server process before its warm-up.'
+  : 'The harness checks every server process before its warm-up; a process that fails is not measured.'}
 
 **Validation runs on one route only.** Adding a schema elsewhere would make some apps measure
 "parse + validate" and others "parse" while still returning identical bytes.
@@ -408,30 +431,38 @@ it at the same rate. In a spot check, raising \`wrk\` from 2 to 8 threads did no
 - **Prepared statements differ by driver.** \`Bun.sql\` prepares and caches per connection;
   \`pg\` and TypeORM issue unnamed statements and re-parse on every call. This favours the
   four \`Bun.sql\` applications on the database reads.
-- **The 256 KB static scenario is bandwidth-bound** — it is dominated by page cache and memory
-  copies rather than framework code. Treat it as an order of magnitude, not a ranking.
+- **The static scenarios rank file-serving strategies**, not routers — see the warning under the
+  charts. The 256 KB file in particular follows synchronous against asynchronous stat.
 - **Scenarios share a process.** Each framework serves all of its scenarios from one process,
   in the same order for every framework, the way a real service would. Memory a route leaves
   behind is visible to the routes measured after it.
-- **Warm-up is split across routes.** The ${P.warmup}s budget is divided evenly over a target's
+${LEGACY_WARMUP ? `- **Warm-up was split across routes.** The ${P.warmup}s budget was divided evenly over a target's
   routes: about ${Math.round(P.warmup / 11)}s each for most stacks, ${Math.round(P.warmup / 14)}s for
   Asena, which also serves the three ORM routes. Bun and Node are warm within seconds, so this
-  is not expected to move results, but it is not identical.
-- **Frameworks ran in a fixed order** (Express, Fastify, NestJS, Elysia, Hono, Asena), one run
+  is not expected to move results, but it is not identical. The harness now gives every route
+  the same seconds.
+` : ''}${R[0]!.reps === 1 ? `- **Frameworks ran in a fixed order** (Express, Fastify, NestJS, Elysia, Hono, Asena), one run
   each. Drift in machine state over the ${(() => { const ts = R.flatMap((t) => [Date.parse((t as any).startedAt), Date.parse((t as any).finishedAt)]); return ((Math.max(...ts) - Math.min(...ts)) / 3_600_000).toFixed(1); })()}-hour sweep is not averaged out.
-- **Handler code is equivalent, with three small exceptions.** Standalone Express reads
-  \`req.query\` field by field, which re-runs its query parser each time (query and list routes);
-  Asena reads the full header map to get one header in the full API route; the NestJS + Express
-  validation DTO lacks one \`@IsDefined()\` the Fastify variant has. Each is worth at most a few
-  percent on its route.
+` : ''}${LEGACY_WARMUP ? `- **Handler code was equivalent, with four small exceptions**, all fixed in the apps since:
+  standalone Express read \`req.query\` field by field, which re-runs its query parser each time
+  (query and list routes); on the full API route Asena and Elysia built the whole header map to
+  read one header (the Asena Hono adapter also sorts it); the NestJS + Express validation DTO
+  lacked one \`@IsDefined()\` the Fastify variant has. Each is worth at most a few percent on its
+  route.
+` : ''}- **No app checks \`Authorization\`** on the full API route. It is sent, but the scenario
+  measures parsing, arithmetic and reshaping, not authentication.
 - **NestJS bundles its own Express and Fastify.** Under NestJS they resolve to Express 5.2.1 and
   Fastify 5.11.3, slightly older than the standalone apps' versions.
-- **The load generator shares the machine** with the server. Pinning keeps them on separate
-  cores, but the L3 cache and memory bandwidth are shared.
-- **One run per scenario.** Differences of a few percent are within run-to-run noise; read
-  close rows as a tie.
+- **The load generator shares the machine** with the server. The server sits alone on one CPU
+  chiplet with its own L3 cache; \`wrk\` and PostgreSQL run on the other chiplet. Memory bandwidth
+  and the I/O die are still shared.
+${R[0]!.reps === 1
+  ? `- **One run per scenario.** Differences of a few percent are within run-to-run noise; read
+  close rows as a tie. On plaintext the top three are ${['asena-ergenecore', 'elysia', 'hono'].map((a) => n(rps(a, 'bun', 's1a'))).join(', ')} req/s — a tie.`
+  : `- **${R[0]!.reps} runs per scenario**, median shown. Differences inside the spread are a tie.`}
 
-The full contract, the harness and every raw result are reproducible from a single command.
+The full contract, the harness, every app and every raw result are in
+[AsenaJs/benchmark](https://github.com/AsenaJs/benchmark).
 `;
 
 const css = `/* Benchmark page — generated by tools/website-page.ts, edit that instead */

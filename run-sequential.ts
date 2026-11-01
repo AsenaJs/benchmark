@@ -5,11 +5,13 @@
  *
  *   bun run-sequential.ts               all jobs, resumes from results-seq/jobs.jsonl
  *   bun run-sequential.ts --assemble    rebuild results/*.json + REPORT.md from the job log
+ *   REPS=3 bun run-sequential.ts        three passes, target order rotated each pass, median reported
  *   SMOKE=1 bun run-sequential.ts       short profile, a few targets, separate log
  *
  * Every job also records a memory/CPU profile sampled from the server's own cgroup.
+ * Resumed records count only if they carry the current code fingerprint.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { requestsFor, type BenchRequest } from './contract/requests.ts';
 import { TARGETS, type Target } from './contract/targets.ts';
@@ -17,7 +19,8 @@ import * as proc from './tools/proc.ts';
 import * as db from './tools/db.ts';
 import * as wrk from './tools/wrk.ts';
 import * as report from './tools/markdown.ts';
-import type { MemoryProfile, ScenarioResult, TargetResult } from './tools/types.ts';
+import { checkRunning } from './tools/conformance.ts';
+import { medianRep, type MemoryProfile, type ScenarioResult, type TargetResult } from './tools/types.ts';
 
 const ROOT = new URL('.', import.meta.url).pathname;
 const SMOKE = !!process.env.SMOKE;
@@ -32,13 +35,36 @@ const MEM_LIMIT_BYTES = 2 * 1024 ** 3;
 const PORT = 21000;
 const SAMPLE_MS = 1000;
 
+const REPS = Math.max(1, Number(process.env.REPS ?? 1));
+
+/** `warmup` is seconds PER ROUTE, so every route gets the same warm-up whatever the route count. */
 const PROFILE: wrk.Profile = SMOKE
-  ? { name: 'smoke', threads: 2, connections: 128, duration: 4, warmup: 10, writeDuration: 4 }
-  : { name: 'seq-1cpu-2gb', threads: 2, connections: 128, duration: 180, warmup: 120, writeDuration: 180 };
+  ? { name: 'smoke', threads: 2, connections: 128, duration: 4, warmup: 1, writeDuration: 4 }
+  : { name: 'seq-1cpu-2gb-v2', threads: 2, connections: 128, duration: 180, warmup: 10, writeDuration: 180 };
+
+function sh(cmd: string[]): string {
+  const r = Bun.spawnSync(cmd, { stdout: 'pipe', stderr: 'pipe' });
+  return new TextDecoder().decode(r.stdout).trim();
+}
+
+/** HEAD plus a hash of any uncommitted or untracked change to what is measured. */
+function fingerprint(): string {
+  const scope = ['apps', 'contract', 'tools', 'run-sequential.ts', 'bun.lock'];
+  const head = sh(['git', '-C', ROOT, 'rev-parse', '--short', 'HEAD']) || 'nogit';
+  const diff = sh(['git', '-C', ROOT, 'diff', 'HEAD', '--', ...scope]);
+  const untracked = sh(['git', '-C', ROOT, 'ls-files', '--others', '--exclude-standard', '--', ...scope])
+    .split('\n').filter(Boolean)
+    .map((f) => `${f}\n${readFileSync(join(ROOT, f), 'utf8')}`).join('\n');
+  const dirty = diff + untracked;
+  return `${PROFILE.name}@${head}${dirty ? `+${Bun.hash(dirty).toString(16).slice(0, 8)}` : ''}`;
+}
+const FINGERPRINT = fingerprint();
 
 interface JobRecord {
   target: string;
   scenario: string;
+  rep?: number;
+  fingerprint?: string;
   ok: boolean;
   note?: string;
   stat?: Omit<wrk.WrkResult, 'raw' | 'durationSec'>;
@@ -48,17 +74,16 @@ interface JobRecord {
   finishedAt: string;
 }
 
+const ASSEMBLE = process.argv.includes('--assemble');
+const key = (target: string, scenario: string, rep = 0) => `${target}/${scenario}/${rep}`;
 const done = new Map<string, JobRecord>();
 if (existsSync(LOG)) {
-  for (const line of readFileSync(LOG, 'utf8').split('\n').filter(Boolean)) {
-    const r = JSON.parse(line) as JobRecord;
-    if (r.ok) done.set(`${r.target}/${r.scenario}`, r);
+  const records = readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as JobRecord);
+  // a resume trusts only runs of this exact code; --assemble republishes the log's latest sweep
+  const wanted = ASSEMBLE ? records.findLast((r) => r.ok)?.fingerprint : FINGERPRINT;
+  for (const r of records) {
+    if (r.ok && r.fingerprint === wanted) done.set(key(r.target, r.scenario, r.rep), r);
   }
-}
-
-function sh(cmd: string[]): string {
-  const r = Bun.spawnSync(cmd, { stdout: 'pipe', stderr: 'pipe' });
-  return new TextDecoder().decode(r.stdout).trim();
 }
 
 function runtimeVersion(t: Target): string {
@@ -87,15 +112,32 @@ function environment(): Record<string, unknown> {
 
 function assemble(): void {
   const all = [...done.values()];
+  const expectedReps = Number(readEnv().reps ?? 1);
   for (const t of TARGETS) {
     const mine = all.filter((r) => r.target === t.id);
-    if (mine.length === 0) continue;
+    const file = join(ROOT, 'results', `${t.id}.json`);
+    if (mine.length === 0) {
+      // a stale file from another sweep would otherwise be reported next to this one
+      if (existsSync(file)) unlinkSync(file);
+      continue;
+    }
     const scenarios: Record<string, ScenarioResult> = {};
     for (const req of requestsFor(t.app).filter((r) => r.benchmark)) {
-      const j = mine.find((r) => r.scenario === req.id);
-      scenarios[req.id] = j?.stat
-        ? { id: req.id, scenario: req.scenario, group: req.group, status: 'ok', reps: [j.stat], median: j.stat, rpsSpread: 0, memory: j.memory }
-        : { id: req.id, scenario: req.scenario, group: req.group, status: 'failed', note: 'not measured', reps: [] };
+      const runs = mine.filter((r) => r.scenario === req.id && r.stat).sort((a, b) => a.stat!.rps - b.stat!.rps);
+      if (runs.length < expectedReps) {
+        const note = runs.length ? `only ${runs.length} of ${expectedReps} runs succeeded` : 'not measured';
+        scenarios[req.id] = { id: req.id, scenario: req.scenario, group: req.group, status: 'failed', note, reps: [] };
+        continue;
+      }
+      const median = medianRep(runs.map((r) => r.stat!));
+      const rpsList = runs.map((r) => r.stat!.rps);
+      scenarios[req.id] = {
+        id: req.id, scenario: req.scenario, group: req.group, status: 'ok',
+        reps: runs.map((r) => r.stat!),
+        median,
+        rpsSpread: (rpsList.at(-1)! - rpsList[0]!) / median.rps,
+        memory: runs[runs.length >> 1]!.memory,
+      };
     }
     const res: TargetResult = {
       target: t.id,
@@ -106,13 +148,13 @@ function assemble(): void {
       dbLayer: t.dbLayer,
       validator: t.validator,
       meta: { ...(mine.find((r) => r.meta)?.meta ?? {}), environment: readEnv() },
-      profile: PROFILE,
-      reps: 1,
+      profile: (readEnv().profile as wrk.Profile | undefined) ?? PROFILE,
+      reps: expectedReps,
       startedAt: mine.map((r) => r.startedAt).sort()[0]!,
       finishedAt: mine.map((r) => r.finishedAt).sort().at(-1)!,
       scenarios,
     };
-    writeFileSync(join(ROOT, 'results', `${t.id}.json`), JSON.stringify(res, null, 2) + '\n');
+    writeFileSync(file, JSON.stringify(res, null, 2) + '\n');
   }
 }
 
@@ -121,7 +163,7 @@ function readEnv(): Record<string, unknown> {
   return existsSync(ENV_FILE) ? JSON.parse(readFileSync(ENV_FILE, 'utf8')) : {};
 }
 
-if (process.argv.includes('--assemble')) {
+if (ASSEMBLE) {
   assemble();
   await report.write();
   process.exit(0);
@@ -232,23 +274,31 @@ const max = (xs: number[]) => (xs.length ? Math.max(...xs) : NaN);
 
 interface Plan {
   target: Target;
+  rep: number;
   reqs: BenchRequest[];
 }
 
-let plans: Plan[] = TARGETS.map((target) => ({
-  target,
-  reqs: requestsFor(target.app).filter((r) => r.benchmark && !done.has(`${target.id}/${r.id}`)),
-})).filter((p) => p.reqs.length > 0);
-if (SMOKE) plans = plans.filter((p) => p.target.id === 'hono-bun' || p.target.id === 'nest-express-node');
+const targets = SMOKE ? TARGETS.filter((t) => t.id === 'hono-bun' || t.id === 'nest-express-node') : TARGETS;
+// each pass starts at a different target, so no framework always runs first or last
+const shift = (rep: number) => Math.round((rep * targets.length) / REPS);
+const plans: Plan[] = Array.from({ length: REPS }, (_, rep) =>
+  [...targets.slice(shift(rep)), ...targets.slice(0, shift(rep))].map((target) => ({
+    target,
+    rep,
+    reqs: requestsFor(target.app).filter((r) => r.benchmark && !done.has(key(target.id, r.id, rep))),
+  })),
+).flat().filter((p) => p.reqs.length > 0);
 
 mkdirSync(OUT, { recursive: true });
-if (!existsSync(ENV_FILE)) writeFileSync(ENV_FILE, JSON.stringify(environment(), null, 2) + '\n');
+if (done.size === 0 || !existsSync(ENV_FILE)) {
+  writeFileSync(ENV_FILE, JSON.stringify({ ...environment(), fingerprint: FINGERPRINT, reps: REPS, profile: PROFILE }, null, 2) + '\n');
+}
 
 const jobCount = plans.reduce((n, p) => n + p.reqs.length, 0);
-const etaSec = plans.length * (PROFILE.warmup + 15) + jobCount * (PROFILE.duration + 3);
+const etaSec = plans.reduce((n, p) => n + p.reqs.length * (PROFILE.warmup + PROFILE.duration + 3) + 20, 0);
 console.log(
-  `run-sequential: ${plans.length} target(s), ${jobCount} scenario(s) left (${done.size} done) · ` +
-    `${PROFILE.warmup}s warmup once per server + ${PROFILE.duration}s per scenario · server cpu ${SERVER_CPU}, ${MEM_LIMIT} · ` +
+  `run-sequential ${FINGERPRINT}: ${REPS} pass(es), ${plans.length} server start(s), ${jobCount} run(s) left (${done.size} done) · ` +
+    `${PROFILE.warmup}s warm-up per route + ${PROFILE.duration}s per scenario · server cpu ${SERVER_CPU}, ${MEM_LIMIT} · ` +
     `ETA ~${(etaSec / 3600).toFixed(1)} h (${new Date(Date.now() + etaSec * 1000).toLocaleTimeString('tr-TR')})`,
 );
 
@@ -309,8 +359,11 @@ interface Server {
   afterWarmup: Snapshot;
 }
 
-/** Warm-up cycles through every scenario so each route is JIT-warm before any measurement. */
-async function bringUp(t: Target, reqs: BenchRequest[], warmupSec: number): Promise<Server> {
+/**
+ * Checks the live process against the whole contract, then warms every benchmarked route for the
+ * same number of seconds, so a resumed or restarted target is as warm as a fresh one.
+ */
+async function bringUp(t: Target, perRouteSec: number): Promise<Server> {
   await proc.reapPort(t.port);
   const unit = `bench-${t.id}-${Date.now()}`;
   const t0 = performance.now();
@@ -326,8 +379,13 @@ async function bringUp(t: Target, reqs: BenchRequest[], warmupSec: number): Prom
   if (!Number.isFinite(pid)) throw new Error('listener pid not found');
   await Bun.sleep(2000);
   const idle = snapshot(cg, pid);
-  const slice = Math.max(5, Math.round(warmupSec / reqs.length));
-  for (const r of reqs) await wrkRun(t, r, slice).catch(() => {});
+  const conformance = await checkRunning(t, meta);
+  if (!conformance.ok) {
+    throw new Error(`conformance failed: ${conformance.failures.slice(0, 3).map((f) => `${f.request} ${f.reason}`).join('; ')}`);
+  }
+  for (const r of requestsFor(t.app).filter((x) => x.benchmark)) {
+    await wrkRun(t, r, perRouteSec).catch(() => {});
+  }
   return { h, cg, pid, meta, startupMs, idle, afterWarmup: snapshot(cg, pid) };
 }
 
@@ -335,8 +393,12 @@ function alive(s: Server): boolean {
   return s.h.proc.exitCode === null && Number.isFinite(rssOf(s.pid));
 }
 
-async function measure(t: Target, s: Server, r: BenchRequest): Promise<void> {
-  const rec: JobRecord = { target: t.id, scenario: r.id, ok: false, startedAt: new Date().toISOString(), finishedAt: '', meta: s.meta };
+async function measure(t: Target, s: Server, r: BenchRequest, rep: number): Promise<void> {
+  const rec: JobRecord = {
+    target: t.id, scenario: r.id, rep, fingerprint: FINGERPRINT, ok: false,
+    startedAt: new Date().toISOString(), finishedAt: '',
+    meta: { ...s.meta, runtimeVersion: runtimeVersion(t), conformance: 'passed' },
+  };
   const sampler = new Sampler(s.cg, s.pid);
   try {
     if (r.isWrite) await db.truncateWrites();
@@ -385,11 +447,11 @@ async function measure(t: Target, s: Server, r: BenchRequest): Promise<void> {
     sampler.stop();
     rec.finishedAt = new Date().toISOString();
     appendFileSync(LOG, JSON.stringify(rec) + '\n');
-    if (rec.ok) done.set(`${rec.target}/${rec.scenario}`, rec);
+    if (rec.ok) done.set(key(rec.target, rec.scenario, rep), rec);
     const rps = rec.stat ? Math.round(rec.stat.rps).toLocaleString('en-US') : `✗ ${rec.note}`;
     const m = rec.memory;
     const mem = m ? ` · rss ${m.rssBeforeMB}→${m.rssPeakMB} MB · core ${m.coreBusyMeasure} (proc ${m.cpuUtilMeasure})` : '';
-    console.log(`[${rec.finishedAt.slice(11, 19)}] ${t.id.padEnd(22)} ${r.id.padEnd(5)} ${rps}${mem}`);
+    console.log(`[${rec.finishedAt.slice(11, 19)}] #${rep} ${t.id.padEnd(22)} ${r.id.padEnd(7)} ${rps}${mem}`);
   }
 }
 
@@ -398,21 +460,29 @@ for (const plan of plans) {
   const t = { ...plan.target, port: PORT };
   let s: Server | null = null;
   try {
-    s = await bringUp(t, plan.reqs, PROFILE.warmup);
-    console.log(`[${new Date().toISOString().slice(11, 19)}] ${t.id} up in ${s.startupMs} ms · rss idle ${MB(s.idle.rss)} MB → after warm-up ${MB(s.afterWarmup.rss)} MB`);
+    s = await bringUp(t, PROFILE.warmup);
+    console.log(`[${new Date().toISOString().slice(11, 19)}] #${plan.rep} ${t.id} up in ${s.startupMs} ms · conformance ok · rss idle ${MB(s.idle.rss)} MB → after warm-up ${MB(s.afterWarmup.rss)} MB`);
     for (const r of plan.reqs) {
       if (aborted) break;
       if (!alive(s)) {
-        console.log(`  ${t.id} died, restarting with a 30s re-warm`);
+        console.log(`  ${t.id} died, restarting with a full re-warm`);
         await proc.stop(s.h).catch(() => {});
-        s = await bringUp(t, plan.reqs, 30);
+        s = await bringUp(t, PROFILE.warmup);
       }
-      await measure(t, s, r);
+      await measure(t, s, r, plan.rep);
       await Bun.sleep(2000);
     }
   } catch (e) {
-    console.log(`  ✗ ${t.id}: ${(e as Error).message.slice(0, 300)}`);
+    const note = (e as Error).message.slice(0, 500);
+    console.log(`  ✗ ${t.id}: ${note.slice(0, 300)}`);
+    const now = new Date().toISOString();
+    for (const r of plan.reqs.filter((x) => !done.has(key(t.id, x.id, plan.rep)))) {
+      const rec: JobRecord = { target: t.id, scenario: r.id, rep: plan.rep, fingerprint: FINGERPRINT, ok: false, note, startedAt: now, finishedAt: now };
+      appendFileSync(LOG, JSON.stringify(rec) + '\n');
+    }
   } finally {
+    // bringUp may have started a process and thrown before handing it back
+    if (current && current !== s?.h) await proc.stop(current).catch(() => {});
     if (s) await proc.stop(s.h).catch(() => {});
     current = null;
   }
@@ -422,7 +492,7 @@ if (SMOKE) process.exit(0);
 assemble();
 await report.write();
 const failed = readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as JobRecord)
-  .filter((r) => !r.ok && !done.has(`${r.target}/${r.scenario}`));
+  .filter((r) => !r.ok && r.fingerprint === FINGERPRINT && !done.has(key(r.target, r.scenario, r.rep)));
 console.log(`\ndone · ${done.size} measured · ${failed.length} failed`);
 for (const f of failed) console.log(`  ✗ ${f.target}/${f.scenario}: ${f.note}`);
 

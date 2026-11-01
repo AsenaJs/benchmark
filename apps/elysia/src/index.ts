@@ -42,7 +42,8 @@ const app = new Elysia()
     const itemId = Number(params.itemId)
     return { id, itemId, sum: id + itemId }
   })
-  .post('/api/orders/:orderId/items', ({ params, query, headers, body }) => {
+  // `request` instead of `headers`: destructuring `headers` makes Elysia build the whole map
+  .post('/api/orders/:orderId/items', ({ params, query, request, body }) => {
     const order = body as OrderBody
     {
       const lines = order.items.map((i) => ({
@@ -54,7 +55,7 @@ const app = new Elysia()
       const taxCents = Math.round(subtotalCents * 0.08)
       return {
         orderId: Number(params.orderId),
-        requestId: headers['x-request-id'] ?? '',
+        requestId: request.headers.get('x-request-id') ?? '',
         currency: query.currency ?? 'USD',
         customer: { id: order.customer.id, name: order.customer.name },
         itemCount: order.items.length,

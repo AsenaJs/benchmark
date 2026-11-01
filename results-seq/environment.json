@@ -13,5 +13,7 @@
   "clientCpus": "1,2,17,18",
   "serverLimits": "systemd scope: MemoryMax=2G, MemorySwapMax=0, taskset 1 logical CPU",
   "wrkCommand": "taskset -c 1,2,17,18 wrk -t2 -c128 -d<N>s --latency --timeout 10s",
-  "sampleIntervalMs": 1000
+  "sampleIntervalMs": 1000,
+  "warmupNote": "this sweep split 120 s evenly over each target's routes (round(120 / routes) s each)",
+  "profile": { "name": "seq-1cpu-2gb", "threads": 2, "connections": 128, "duration": 180, "warmup": 120, "writeDuration": 180 }
 }

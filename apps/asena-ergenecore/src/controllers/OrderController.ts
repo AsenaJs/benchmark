@@ -13,7 +13,7 @@ export class OrderController {
   public async addItems(context: Context) {
     const dto = await context.getBody<OrderDto>();
     const orderId = Number(context.getParam('orderId'));
-    const requestId = context.headers['x-request-id'] ?? '';
+    const requestId = context.req.headers.get('x-request-id') ?? '';
     const currency = (await context.getQuery('currency')) || 'USD';
 
     return context.send(this.orderService.summarise(orderId, requestId, currency, dto), 200);

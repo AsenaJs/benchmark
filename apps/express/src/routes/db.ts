@@ -13,8 +13,9 @@ router.get('/user/:id', async (req, res) => {
 });
 
 router.get('/users', async (req, res) => {
-  const limit = Math.min(Number(req.query.limit ?? 20) || 20, 100);
-  const offset = Number(req.query.offset ?? 0) || 0;
+  const q = req.query;
+  const limit = Math.min(Number(q.limit ?? 20) || 20, 100);
+  const offset = Number(q.offset ?? 0) || 0;
   const items = await listUsers(limit, offset);
   res.json({ count: items.length, items });
 });

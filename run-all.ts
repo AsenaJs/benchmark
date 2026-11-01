@@ -156,10 +156,10 @@ async function measure(target: Target): Promise<TargetResult> {
     for (let rep = 1; rep <= REPS; rep++) {
       if (aborted) break;
       try {
-        if (r.isWrite) await db.truncateWrites();
         current = await proc.start(target, PIN);
         await proc.waitHealthy(target, current);
         await wrk.run(target, r, profile, profile.warmup, PIN); // warmup, discarded
+        if (r.isWrite) await db.truncateWrites();
         const res = await wrk.run(target, r, profile, seconds, PIN);
         if (res.non2xx > 0 || res.socketErrors > 0) {
           throw new Error(`${res.non2xx} non-2xx, ${res.socketErrors} socket errors`);

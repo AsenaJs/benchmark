@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsDefined,
   IsEmail,
   IsInt,
   IsString,
@@ -43,6 +44,7 @@ export class CreateUserDto {
   @IsString({ each: true })
   tags: string[];
 
+  @IsDefined()
   @ValidateNested()
   @Type(() => AddressDto)
   address: AddressDto;
