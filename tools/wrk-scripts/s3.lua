@@ -1,0 +1,5 @@
+wrk.method = "POST"
+wrk.headers["Content-Type"] = "application/json"
+wrk.headers["X-Request-Id"] = "bench-fixed-id"
+wrk.headers["Authorization"] = "Bearer benchmark-token"
+wrk.body = "{\"customer\":{\"id\":77,\"name\":\"Ada Lovelace\",\"email\":\"ada@example.com\"},\"items\":[{\"sku\":\"SKU-1\",\"qty\":2,\"priceCents\":1999},{\"sku\":\"SKU-2\",\"qty\":1,\"priceCents\":550},{\"sku\":\"SKU-3\",\"qty\":4,\"priceCents\":225}],\"note\":\"benchmark payload\"}"

@@ -1,0 +1,17 @@
+{
+  "cpuModel": "AMD Ryzen 9 9950X3D 16-Core Processor",
+  "kernel": "7.2.11-arch1-1",
+  "governor": "performance",
+  "smt": true,
+  "bun": "1.4.4",
+  "node": "v26.13.0",
+  "wrk": "wrk f8eb608 [epoll] Copyright (C) 2012 Will Glozer",
+  "postgres": "postgres (PostgreSQL) 18.3 (Debian 18.3-1.pgdg13+1)",
+  "postgresCpuset": "3-7,19-23",
+  "serverCpu": 9,
+  "serverIdleSibling": 25,
+  "clientCpus": "1,2,17,18",
+  "serverLimits": "systemd scope: MemoryMax=2G, MemorySwapMax=0, taskset 1 logical CPU",
+  "wrkCommand": "taskset -c 1,2,17,18 wrk -t2 -c128 -d<N>s --latency --timeout 10s",
+  "sampleIntervalMs": 1000
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.glm-build/
+.glm-audit/
+public/
+results-par/
+results-prev-*/
+results-seq/smoke*
+results/.*.log

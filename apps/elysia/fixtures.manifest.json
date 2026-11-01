@@ -1,0 +1,14 @@
+{
+  "index.html": {
+    "bytes": 4096,
+    "sha256": "7aa037ed1dcff4f56483bca557864ebfff81de66bf21fb39c507b6e9fd5327e6"
+  },
+  "app.js": {
+    "bytes": 65536,
+    "sha256": "41bc074a7fda3c098f801e2465abea52f80c07e8821329105f27d3e5a7f6b8a9"
+  },
+  "logo.png": {
+    "bytes": 262144,
+    "sha256": "ee4538a838ccf4bc8522ff4602e20b2f96e32edccf0e81d82f6beedc18fcfaf3"
+  }
+}

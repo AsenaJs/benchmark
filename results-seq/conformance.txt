@@ -1,0 +1,13 @@
+# conformance on the measured builds, 2026-11-01T08:05:44Z, after the sweep, no source change since
+conformance: 8 app(s)
+
+  ✅ express-node             17 requests
+  ✅ fastify-node             17 requests
+  ✅ nest-express-node        17 requests
+  ✅ nest-fastify-node        17 requests
+  ✅ elysia-bun               17 requests
+  ✅ hono-bun                 17 requests
+  ✅ asena-hono-bun           20 requests
+  ✅ asena-ergenecore-bun     20 requests
+
+8/8 green

@@ -1,0 +1,17 @@
+{
+  "name": "bench-hono",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start:bun": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "0.9.0",
+    "hono": "4.13.14",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "5.9.3"
+  }
+}

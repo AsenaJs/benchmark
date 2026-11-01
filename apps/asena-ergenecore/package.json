@@ -1,0 +1,22 @@
+{
+  "name": "bench-asena-ergenecore",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "asena build",
+    "start:bun": "bun dist/index.asena.js"
+  },
+  "dependencies": {
+    "@asenajs/asena": "0.12.1",
+    "@asenajs/asena-drizzle": "4.0.1",
+    "@asenajs/ergenecore": "5.0.1",
+    "drizzle-orm": "0.45.4",
+    "reflect-metadata": "0.2.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@asenajs/asena-cli": "0.11.0",
+    "@types/bun": "1.4.0",
+    "typescript": "5.9.3"
+  }
+}

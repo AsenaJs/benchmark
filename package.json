@@ -1,0 +1,17 @@
+{
+  "name": "asena-benchmark",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "reference"],
+  "scripts": {
+    "fixtures": "bun tools/gen-fixtures.ts",
+    "db:reset": "bun tools/db.ts",
+    "conformance": "bun tools/conformance.ts",
+    "bench": "bun run-all.ts",
+    "bench:quick": "bun run-all.ts --profile quick"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}
